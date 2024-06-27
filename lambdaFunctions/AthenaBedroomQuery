@@ -1,0 +1,67 @@
+import boto3
+import time
+
+def lambda_handler(event, context):
+    client = boto3.client('athena')
+    s3_client = boto3.client('s3')
+    
+    query = """
+    SELECT 
+    propertytype,
+    t.bedrooms,
+    count(propertytype) as number_of_listings,
+    AVG(pricevalue) AS average_cost
+FROM 
+    toronto_1000_report t
+GROUP BY 
+    propertytype, t.bedrooms
+ORDER BY 
+    propertytype, t.bedrooms;
+    """
+    
+    output_location = 's3://athena-query-results-zillow/results/'
+    final_output_path = 's3://athena-query-results-zillow/results/results.csv'
+    
+    response = client.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={
+            'Database': 'zillow_db'
+        },
+        ResultConfiguration={
+            'OutputLocation': output_location,
+        }
+    )
+    
+    query_execution_id = response['QueryExecutionId']
+    
+    # Wait for the query to finish
+    status = 'RUNNING'
+    while status in ['RUNNING', 'QUEUED']:
+        response = client.get_query_execution(QueryExecutionId=query_execution_id)
+        status = response['QueryExecution']['Status']['State']
+        if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+            break
+        time.sleep(5)
+    
+    if status == 'SUCCEEDED':
+        # Get the output file path
+        result_output = response['QueryExecution']['ResultConfiguration']['OutputLocation']
+        
+        # Extract bucket and key from the result output
+        output_bucket = 'athena-query-results-zillow'
+        result_key = result_output.split(output_bucket + '/')[1]
+        
+        # Copy the result file to the desired location with a specific name
+        s3_client.copy_object(
+            Bucket=output_bucket,
+            CopySource={'Bucket': output_bucket, 'Key': result_key},
+            Key='results/results.csv'
+        )
+        
+        # Optionally, delete the original Athena-generated file
+        s3_client.delete_object(Bucket=output_bucket, Key=result_key)
+        s3_client.delete_object(Bucket=output_bucket, Key=f"{result_key}.metadata")
+        
+        return f'{final_output_path}'
+    else:
+        return 'Query failed'
